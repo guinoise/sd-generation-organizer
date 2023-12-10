@@ -9,8 +9,8 @@ our generated images from stable-diffusion-webui.
 The project started from personnel needs and some features are inspired from
 other extensions. 
 
-## Main features
-# Database storage and metadata
+# Main features
+## Database storage and metadata
 All generated images are parsed and indexed into a database.
 
 Data are extracted and stored into the database.
@@ -18,7 +18,7 @@ Data are extracted and stored into the database.
 Some metadata are added to the database and/or image metadata. For example the
 metadata for date creation of the image (which should be the generation datetime) is not stored inside the PNG metada. This extension will add this metadata.
 
-# Casting capabilities
+## Casting capabilities
 I started to create an extension that allow me to cast the images while
 they are generated. But the lack of capabalities to organized the results from
 stable diffusion was a deal breaker at some point and rendered the extension not so usefull. So I decided to combined the efforts in this extension instead.
