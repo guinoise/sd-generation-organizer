@@ -1,6 +1,6 @@
 import launch
 
-mods= ["SQLAlchemy", "Pillow", "sqlite4", "pathlib"]
+mods= ["SQLAlchemy", "Pillow", "sqlite4", "pathlib", "pychromecast"]
 
 for m in mods:
     if not launch.is_installed(m):

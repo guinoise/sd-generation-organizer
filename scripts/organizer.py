@@ -1,19 +1,108 @@
+from typing import Optional
 from generation_organizer.helpers import logger as helper_logger, base_dir, temp_dir
 from modules import script_callbacks, shared, scripts
-from modules.ui import create_refresh_button
+from modules.ui import create_refresh_button, ToolButton
 import gradio as gr
 import pychromecast
-from generation_organizer.casting import CastConfiguration, CastType
+from generation_organizer.casting import CastConfiguration, CastType, ImageInfo, ImageType, CastThread
+from datetime import datetime
 from matplotlib import font_manager
 import socket
+from queue import Empty, Full, Queue
+from modules.processing import StableDiffusionProcessing, Processed
+from threading import Event
 
 logger= helper_logger.getChild(__name__)
-logger.debug("here")
-logger.info("here")
-logger.warning("here")
-logger.critical("here")
-
+#symbol_stop= '⏹️'
+symbol_stop= '🛑'
+symbol_play= '▶️'
+## EMOJI https://emojipedia.org/
+## Variables
+logger.info("Importing module, defining variable")
 initial_scan_done: bool= False
+selected_font= None
+selected_font= None
+casting: bool= False
+cast_devices= []
+image_queue: Optional[Queue[ImageInfo]]= None
+cast_thread: Optional[CastThread]= None
+cast_thread_stop_event: Event= Event()
+base_url: str= None
+btn_casting: ToolButton= None
+# End Variables
+
+class CastingScript(scripts.Script):
+
+    def __init__(self):
+        super().__init__()
+        logger.debug("CastingScript::__init__")
+        self._send_to_cast_thread= False
+        #script_callbacks.on_app_started(lambda block, _: self.on_app_started(block))
+
+    def title(self):
+        logger.debug("CastingScript::title")
+        """this function should return the title of the script. This is what will be displayed in the dropdown menu."""
+        return "Casting"
+    
+    def show(self, is_img2img):
+        """
+        is_img2img is True if this function is called for the img2img interface, and Fasle otherwise
+
+        This function should return:
+         - False if the script should not be shown in UI at all
+         - True if the script should be shown in UI if it's selected in the scripts dropdown
+         - script.AlwaysVisible if the script should be shown in UI at all times
+         """
+        logger.debug("CastingScript::show")
+        logger.debug("Args %20s (%s) %r", "is_img2img", type(is_img2img), is_img2img)
+        return scripts.AlwaysVisible
+
+    def postprocess_image(self, p: StableDiffusionProcessing, pp: scripts.PostprocessImageArgs, *args):
+        """
+        Called for every image after it has been generated.
+        """
+        logger.debug("CastingScript::postprocess_image")
+        if not casting:
+            return
+        logger.debug("Args %20s (%s) %r", "p", type(p), p)
+        logger.debug("Args %20s (%s) %r", "pp", type(pp), pp)
+        logger.debug("Args %20s %r", "args", args)
+        if issubclass(type(pp), Processed):
+            logger.info("postprocess_image: Processed")
+            info= ImageInfo(ImageType.STABLE_DIFFUSION_PROCESSED, obj= pp, creation_date=datetime.now(), message= None)
+            self._enqueue(info)
+        if issubclass(type(pp), scripts.PostprocessImageArgs):
+            logger.info("postprocess_image: PostprocessImageArgs")
+            logger.info("p :(%s) %s", type(p), p)
+            messages=[]
+            messages.append(f"PostprocessImageArgs {p.n_iter}/{p.batch_size}")
+            messages.append(f"seed {p.seeds[p.iteration]}")
+            #messages.append(f"eta {p.eta}")
+            info= ImageInfo(ImageType.PIL, obj= pp.image, creation_date=datetime.now(), message= messages)
+            self._enqueue(info)
+        elif issubclass(type(p), StableDiffusionProcessing):
+            logger.info("postprocess_image: StableDiffusionProcessing")
+            info= ImageInfo(ImageType.STABLE_DIFFUSION_PROCESSING, obj= pp, creation_date=datetime.now(), message= None)            
+            self._enqueue(info)
+        else:
+            logger.warning("PP: Unsuported type %s", type(pp))
+
+    def _enqueue(self, img_info: ImageInfo):
+        if image_queue is None:
+            logger.error("Queue object not found, discarding object")
+            return
+        if image_queue.full():
+            logger.warning("Queue was full, dropping one object")
+            try:
+                image_queue.get_nowait()
+            except Empty:
+                pass
+        try:
+            image_queue.put_nowait(img_info)
+        except Full:
+            logger.warning("Error queueing image, queue full")            
+
+
 
 def on_ui_settings():
     logger.debug("on_ui_settings")
@@ -60,8 +149,7 @@ When the server start (restart, reload, reload ui), try to reconnect to last act
         ),
     )  
 
-cast_devices= []
-      
+     
 def get_cast_devices_list():
     logger.debug("get_cast_devices_list : %s", cast_devices)
     return cast_devices
@@ -81,19 +169,81 @@ def refresh_cast_devices():
     cast_devices.extend(chromecast_devices) 
     #return gr.Dropdown.update(choices=get_cast_devices_list())
 
-def cast_setting_change(*args, **kwargs):
+def start_casting(device_name: str) -> bool :
+    global cast_thread, cast_thread_stop_event, image_queue
+    logger.info("start_casting")
+    if cast_thread is not None:
+        logger.warning("Ask to start casting but already casting, stop first")
+        stop_casting()
+
+    if device_name not in cast_devices:
+        logger.warning("Requested to start casting on %s but not in cast devices discoverd", device_name)
+        return False
+    logger.warning("start_casting")
+    config= CastConfiguration(cast_type=CastType.CHROMECAST, device_name=device_name, base_callback_url=base_url, temp_dir=temp_dir, font_path=selected_font)
+    #Just to be sure
+    cast_thread_stop_event.clear()
+    if image_queue is None:
+        image_queue= Queue(maxsize=10)        
+    cast_thread= CastThread(stop_event=cast_thread_stop_event, image_queue=image_queue, config=config)
+    cast_thread.start()
+    return True
+
+def stop_casting():
+    global cast_thread, cast_thread_stop_event
+    logger.warning("stop_casting")
+    if cast_thread is None:
+        return
+    
+    logger.info("Request stop of cast thread")
+    cast_thread_stop_event.set()
+    logger.info("Wait for cast thread to teard down, max 5 seconds")
+    cast_thread.join(timeout=5)
+    cast_thread= None
+
+
+def btn_casting_pushed(device, *args, **kwargs):
+    global casting
+    logger.debug("btn_casting_pushed")
+    logger.debug("Args %20s (%s), %r", "device", type(device), device)
+    logger.debug("Args %20s %r", "args", args)
+    logger.debug("Args %20s %r", "kwargs", kwargs)
+    logger.debug("btn_casting_pushed was casting: %s", casting)
+    if casting:
+        stop_casting()
+        casting= False
+    else:
+        casting= start_casting(device_name=device)
+    symbol= symbol_stop if casting else symbol_play
+    return gr.Button.update(value=symbol)
+
+def cast_setting_change(device_name, *args, **kwargs):
     global image_queue, cast_thread, cast_thread_stop_event, cast_devices, casting
     logger.debug("cast_setting_change")
     logger.debug("Args %20s %r", "args", args)
     logger.debug("Args %20s %r", "kwargs", kwargs)
-    device_name= getattr(shared.opts, "cast_device", None)
-    casting= (getattr(shared.opts, "casting", False) 
-              and device_name is not None
-              and device_name in cast_devices)
-    logger.debug("Cast setting change. Casting option %5s Casting %5s device_name : %s devices: %s", getattr(shared.opts, "casting", None), casting, device_name, cast_devices)
+    logger.debug("Device name : %s, is casting %s", device_name, casting)
+    if casting:
+        stop_casting()
+        casting= start_casting(device_name=device_name)
+
+    logger.debug("cast_setting_change casting value: %s", casting)
+    symbol= symbol_stop if casting else symbol_play
+    return gr.Button.update(value=symbol)
+        
+        
+    # device_name= getattr(shared.opts, "cast_device", None)
+    # casting= (getattr(shared.opts, "casting", False) 
+    #           and device_name is not None
+    #           and device_name in cast_devices)
+    #logger.debug("Cast setting change. Casting option %5s Casting %5s device_name : %s devices: %s", getattr(shared.opts, "casting", None), casting, device_name, cast_devices)
     # if casting and device_name and cast_thread is None:
     #     logger.warning("Starting casting thread")
-    #     config= CastConfiguration(cast_type=CastType.CHROMECAST, device_name=device_name, base_callback_url=base_url, temp_dir=temp_dir)
+    #     config= CastConfiguration(cast_type=CastType.CHROMECAST, 
+    #                               device_name=device_name, 
+    #                               base_callback_url=base_url, 
+    #                               temp_dir=temp_dir,
+    #                               font_path=selected_font)
     #     #Just to be sure
     #     cast_thread_stop_event.clear()
     #     if image_queue is None:
@@ -113,6 +263,7 @@ def cast_setting_change(*args, **kwargs):
             
     
 def on_ui_tab(**_kwargs):
+    global btn_casting
     """register a function to be called when the UI is creating new tabs.
     The function must either return a None, which means no new tabs to be added, or a list, where
     each element is a tuple:
@@ -129,8 +280,6 @@ def on_ui_tab(**_kwargs):
                            label="Casting device",
                            interactive=True,
                            elem_id="generation_organizer_casting_devices")
-            dd_devices.change(fn=cast_setting_change)
-
             #btn_rescan= gr.Button("🔄", visible=True)
             #btn_rescan.click(fn=refresh_cast_devices, outputs=[dd_devices])
             # create_refresh_button(
@@ -140,6 +289,22 @@ def on_ui_tab(**_kwargs):
             #     f"refresh_{id_part}_checkpoint",
             # )
             create_refresh_button(dd_devices, refresh_cast_devices, lambda: {"choices": get_cast_devices_list()}, "generation_organizer_casting_devices_refresh")
+            btn_casting= ToolButton(value=symbol_stop if casting else symbol_play, 
+                                    elem_id="generation_organizer_casting",
+                                    tooltip="Cast")
+
+            dd_devices.change(fn=cast_setting_change, inputs=dd_devices, outputs=btn_casting)
+            btn_casting.click(
+                fn=btn_casting_pushed,
+                inputs=dd_devices,
+                outputs=btn_casting
+            )
+            # refresh_button = ToolButton(value=refresh_symbol, elem_id=elem_id, tooltip=f"{label}: refresh" if label else "Refresh")
+            # refresh_button.click(
+            #     fn=refresh,
+            #     inputs=[],
+            #     outputs=refresh_components
+            # )            
             #im_cast= gr.Image(type="filepath", value=base_dir.joinpath('assets/cast-logo.png'), visible=True, interactive=False, width=32)
             
             

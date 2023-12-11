@@ -10,8 +10,9 @@ The project started from personnel needs and some features are inspired from
 other extensions. 
 
 # Features
-## Work in progress / Roadmap
+## Work in progress / Roadmap / TODO
 - [x] UI Tab
+- [ ] Keep value on browser refresh
 - [ ] UI Options
 - [ ] Casting capabilities
     - [ ] Devices
@@ -22,6 +23,7 @@ other extensions.
         - [ ] Cast selected
         - [ ] Create a gallery
         - [ ] Auto reconnect on start
+    - [ ] Refactor with hijacking instead of scripts.Script
 - [ ] Gallery of outputs
 - [ ] Queue manager
 - [ ] Diff between generated inputs (parameters)
